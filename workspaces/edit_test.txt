@@ -1,0 +1,3 @@
+Hello Python
+Hello Qwen
+Welcome to Local AI
