@@ -1,0 +1,860 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Local AI Agent</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #17243b;
+      --muted: #718096;
+      --line: #e5eaf1;
+      --surface: #ffffff;
+      --canvas: #f4f6fa;
+      --blue: #4263eb;
+      --blue-soft: #edf1ff;
+      --green: #17865b;
+      --amber: #a66a08;
+      --red: #c33f4b;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      color: var(--ink);
+      background: var(--canvas);
+    }
+
+    button, textarea { font: inherit; }
+
+    .topbar {
+      height: 68px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 32px;
+      background: var(--surface);
+      border-bottom: 1px solid var(--line);
+    }
+
+    .brand { display: flex; align-items: center; gap: 12px; font-weight: 700; }
+    .brand-mark {
+      display: grid;
+      width: 34px;
+      height: 34px;
+      place-items: center;
+      border-radius: 11px;
+      color: white;
+      background: var(--blue);
+      font-size: 15px;
+    }
+    .brand small { display: block; margin-top: 2px; color: var(--muted); font-size: 11px; font-weight: 500; }
+    .backend-pill {
+      padding: 7px 11px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      color: #53627a;
+      background: #fbfcfe;
+      font-size: 12px;
+    }
+    .backend-pill::before {
+      display: inline-block;
+      width: 7px;
+      height: 7px;
+      margin-right: 7px;
+      border-radius: 50%;
+      background: var(--green);
+      content: "";
+    }
+
+    main { width: min(1120px, calc(100% - 40px)); margin: 40px auto; }
+    .intro { margin-bottom: 24px; }
+    .intro h1 { margin: 0 0 8px; font-size: clamp(24px, 3vw, 32px); letter-spacing: -0.8px; }
+    .intro p { margin: 0; color: var(--muted); font-size: 14px; }
+
+    .chat-shell {
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: var(--surface);
+      box-shadow: 0 12px 36px rgba(29, 48, 82, 0.06);
+    }
+    .chat-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 16px 20px;
+      border-bottom: 1px solid var(--line);
+      font-size: 13px;
+      font-weight: 650;
+    }
+    .connection { color: var(--muted); font-size: 12px; font-weight: 500; }
+    .connection.online { color: var(--green); }
+
+    .conversation {
+      display: flex;
+      min-height: 390px;
+      max-height: min(66vh, 720px);
+      flex-direction: column;
+      gap: 22px;
+      overflow-y: auto;
+      padding: 24px;
+    }
+    .empty-state {
+      display: grid;
+      flex: 1;
+      align-content: center;
+      justify-items: center;
+      padding: 45px 20px;
+      text-align: center;
+    }
+    .empty-icon {
+      display: grid;
+      width: 48px;
+      height: 48px;
+      margin-bottom: 16px;
+      place-items: center;
+      border-radius: 15px;
+      color: var(--blue);
+      background: var(--blue-soft);
+      font-size: 22px;
+    }
+    .empty-state strong { font-size: 16px; }
+    .empty-state p { max-width: 440px; margin: 8px 0 0; color: var(--muted); font-size: 13px; line-height: 1.6; }
+
+    .message { display: flex; flex-direction: column; gap: 12px; }
+    .user-message { align-self: flex-end; max-width: min(78%, 680px); }
+    .user-bubble {
+      padding: 12px 15px;
+      border-radius: 14px 14px 4px 14px;
+      color: #fff;
+      background: #253653;
+      line-height: 1.55;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+    .assistant-message { width: 100%; }
+    .assistant-heading { display: flex; align-items: center; gap: 9px; color: #44536b; font-size: 12px; font-weight: 650; }
+    .assistant-heading .avatar {
+      display: grid;
+      width: 25px;
+      height: 25px;
+      place-items: center;
+      border-radius: 8px;
+      color: var(--blue);
+      background: var(--blue-soft);
+      font-size: 12px;
+    }
+    .assistant-content { display: flex; flex-direction: column; gap: 12px; padding-left: 34px; }
+    .understanding,
+    .task-item {
+      /*padding: 13px 15px;
+      border: 1px solid #dfe6ff;
+      border-radius: 11px;
+      background: #f7f8ff;*/
+      color: silver;
+      /* display: flex;
+      align-items: center; */
+      display: grid;
+      grid-template-columns: 20px auto 100px;
+      align-items: start;
+    }
+    .section-label {
+      margin-bottom: 6px;
+      color: #6678c9;
+      font-size: 10px;
+      font-weight: 750;
+      letter-spacing: 0.09em;
+      text-transform: uppercase;
+    }
+    .understanding p { margin: 0; font-size: 13px; line-height: 1.6; }
+    .round-title { margin: 4px 0 0; color: #8490a2; font-size: 11px; font-weight: 700; letter-spacing: 0.07em; text-transform: uppercase; }
+    .stage-card, .task-card {
+      /* padding: 13px 15px;
+      border: 1px solid var(--line);
+      border-radius: 11px;
+      background: #fff; */
+      
+    }
+    .stage-top, .task-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+    .stage-name, .task-name { display: flex; align-items: center; gap: 9px; font-size: 13px; font-weight: 650; }
+    .stage-icon {
+      display: grid;
+      width: 24px;
+      height: 24px;
+      place-items: center;
+      border-radius: 7px;
+      color: var(--blue);
+      background: var(--blue-soft);
+      font-size: 12px;
+    }
+    .timer { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+    .stage-status, .task-status {
+      padding: 4px 8px;
+      border-radius: 999px;
+      color: #69778c;
+      background: #f1f3f6;
+      font-size: 10px;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+    .is-running .stage-status, .is-running .task-status { color: #435ed1; background: var(--blue-soft); }
+    .is-complete .stage-status, .is-complete .task-status { color: var(--green); background: #eaf7f0; }
+    .is-failed .stage-status, .is-failed .task-status { color: var(--red); background: #fff0f1; }
+    .is-skipped .task-status { color: var(--amber); background: #fff5df; }
+    .planning-output { margin-top: 11px; }
+    .planning-output summary { color: #7b8799; cursor: pointer; font-size: 11px; }
+    .planning-output pre {
+      max-height: 180px;
+      overflow: auto;
+      margin: 8px 0 0;
+      padding: 10px;
+      border-radius: 8px;
+      color: #5b6678;
+      background: #f7f8fa;
+      font: 11px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+    .plan-summary { margin: 9px 0 0; color: var(--muted); font-size: 11px; }
+    .task-list { display: flex; flex-direction: column; gap: 8px; }
+    .task-card { 
+      /* padding: 11px 13px; background: #fbfcfe;  */
+    }
+    .task-name { font-size: 12px; }
+    .task-purpose { margin: 7px 0 0; color: #647187; font-size: 12px; line-height: 1.5; }
+    .task-details { margin-top: 8px; }
+    .task-details summary { color: #8490a2; cursor: pointer; font-size: 10px; }
+    .task-details pre { margin: 6px 0 0; padding: 8px; border-radius: 7px; background: #f2f4f7; font-size: 10px; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .task-output { margin: 9px 0 0; padding: 9px; border-radius: 7px; color: #48566c; background: #f5f7fa; font: 11px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .answer {
+      min-height: 20px;
+      color: #27364d;
+      font-size: 14px;
+      line-height: 1.7;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+    .error-message { padding: 11px 13px; border: 1px solid #ffd9dc; border-radius: 9px; color: #a8323c; background: #fff7f7; font-size: 12px; }
+    .approval-card {
+      padding: 14px;
+      border: 1px solid #f1d59b;
+      border-radius: 11px;
+      background: #fffaf0;
+    }
+    .approval-card strong { display: block; margin-bottom: 5px; font-size: 13px; }
+    .approval-card p { margin: 0; color: #75633f; font-size: 12px; line-height: 1.5; }
+    .approval-card pre { max-height: 130px; overflow: auto; margin: 9px 0; padding: 8px; border-radius: 7px; background: #fff; font-size: 10px; white-space: pre-wrap; }
+    .approval-actions { display: flex; gap: 8px; }
+
+    .composer-wrap { padding: 16px 20px 19px; border-top: 1px solid var(--line); background: #fcfdff; }
+    .composer {
+      display: flex;
+      align-items: flex-end;
+      gap: 12px;
+      padding: 10px 11px 10px 15px;
+      border: 1px solid #dce2eb;
+      border-radius: 13px;
+      background: #fff;
+      transition: border-color 120ms, box-shadow 120ms;
+    }
+    .composer:focus-within { border-color: #9cafff; box-shadow: 0 0 0 3px rgba(66, 99, 235, 0.08); }
+    textarea {
+      width: 100%;
+      min-height: 28px;
+      max-height: 140px;
+      resize: vertical;
+      border: 0;
+      outline: 0;
+      color: var(--ink);
+      background: transparent;
+      font-size: 13px;
+      line-height: 1.5;
+    }
+    textarea::placeholder { color: #9aa5b5; }
+    .send-button, .approval-button {
+      border: 0;
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 12px;
+      font-weight: 700;
+      transition: background 120ms, opacity 120ms;
+    }
+    .send-button { min-width: 72px; height: 36px; color: #fff; background: var(--blue); }
+    .send-button:hover { background: #3453d1; }
+    .send-button:disabled { cursor: wait; opacity: 0.55; }
+    .approval-button { padding: 8px 12px; }
+    .approve { color: #fff; background: var(--green); }
+    .deny { color: #59667a; background: #e9edf2; }
+    .hint { margin: 9px 2px 0; color: #98a2b1; font-size: 10px; }
+
+    @media (max-width: 640px) {
+      .topbar { height: 60px; padding: 0 16px; }
+      main { width: calc(100% - 20px); margin: 24px auto; }
+      .conversation { min-height: 350px; max-height: 65vh; padding: 16px 12px; }
+      .assistant-content { padding-left: 0; }
+      .user-message { max-width: 90%; }
+      .composer-wrap { padding: 12px; }
+      .backend-pill { font-size: 10px; }
+    }
+    .loader_waiting {
+      width: 13px;
+      aspect-ratio: 1;
+      border-radius: 50%;
+      border: 3px solid #0000;
+      border-right-color: #ffa50097;
+      position: relative;
+      animation: l24 1s infinite linear;
+    }
+    .loader_waiting:before,
+    .loader_waiting:after {
+      content: "";
+      position: absolute;
+      inset: -3px;
+      border-radius: 50%;
+      border: inherit;
+      animation: inherit;
+      animation-duration: 2s;
+    }
+    .loader_waiting:after {
+      animation-duration: 4s;
+    }
+    .understanding_text,
+    .task_item_text{
+      font-size: 13px;
+      display: inline-block;
+      margin-left: 10px;
+      margin-bottom: 10px;
+      line-height: 15px;
+    }
+
+    .understanding_timer,
+    .task_item_timer{
+       font-size: 12px;
+      display: inline-block;
+      margin-left: 10px;
+      font-weight: 600;
+      text-align: right;
+    }
+
+    .circle-check {
+      position: relative;
+      display: inline-block;
+      width: 13px;
+      height: 13px;
+      background-color: #28a745;
+      border-radius: 50%;
+    }
+
+    .circle-check::after {
+      content: "";
+      position: absolute;
+      left: 4px;
+      top: 2px;
+      width: 3px;
+      height: 6px;
+      border: solid white;
+      border-width: 0 2px 2px 0;
+      transform: rotate(45deg);
+    }
+
+    .answer-stage{
+      background-color: #fff;
+      padding: 7px;
+      border-radius: 8px;
+      border: 1px solid #c0c0c085;
+    }
+    .answer-stage .stage-top{
+      margin-bottom: 7px;
+    }
+
+    @keyframes l24 {
+      100% {transform: rotate(1turn)}
+    }
+    
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand-mark">✦</div>
+      <div>Local AI Agent<small>Plan · act · explain</small></div>
+    </div>
+    <div id="backend-pill" class="backend-pill">Connecting…</div>
+  </header>
+
+  <main>
+
+    <section class="chat-shell" aria-label="Chat">
+      <div class="chat-header">
+        <span>Conversation</span>
+        <span id="connection" class="connection">Connecting to local agent…</span>
+      </div>
+      <div id="conversation" class="conversation" aria-live="polite">
+        <div id="empty-state" class="empty-state">
+          <div class="empty-icon">✦</div>
+          <strong>Ready when you are</strong>
+          <p>Ask a question or describe a task. Planning and each tool operation will appear here with live timings.</p>
+        </div>
+      </div>
+      <form id="chat-form" class="composer-wrap">
+        <div class="composer">
+          <textarea id="question" rows="1" placeholder="Message your local agent…" required></textarea>
+          <button id="send" class="send-button" type="submit">Send</button>
+        </div>
+        <div class="hint">Enter to send · Shift + Enter for a new line · Sensitive actions ask for approval</div>
+      </form>
+    </section>
+  </main>
+
+  <script>
+    const conversation = document.getElementById("conversation");
+    const form = document.getElementById("chat-form");
+    const input = document.getElementById("question");
+    const sendButton = document.getElementById("send");
+    const connection = document.getElementById("connection");
+    const backendPill = document.getElementById("backend-pill");
+    const conversationHistory = [];
+
+    function element(tag, className, text) {
+      const node = document.createElement(tag);
+      if (className) node.className = className;
+      if (text !== undefined) node.textContent = text;
+      return node;
+    }
+
+    function scrollToLatest() {
+      conversation.scrollTop = conversation.scrollHeight;
+    }
+
+    function formatDuration(milliseconds) {
+      const seconds = milliseconds / 1000;
+      if (seconds < 1) return `${seconds.toFixed(2)}s`;
+      return seconds < 60
+        ? `${seconds.toFixed(1)}s`
+        : `${Math.floor(seconds / 60)}m ${(seconds % 60).toFixed(0)}s`;
+    }
+
+    function startTimer(timerNode, card) {
+      const started = performance.now();
+      timerNode.textContent = "0.0s";
+      card.classList.add("is-running");
+      const interval = setInterval(() => {
+        timerNode.textContent = formatDuration(performance.now() - started);
+      }, 100);
+      return (elapsedMs, failed = false) => {
+        clearInterval(interval);
+        timerNode.textContent = formatDuration(elapsedMs);
+        card.classList.remove("is-running");
+        card.classList.add(failed ? "is-failed" : "is-complete");
+      };
+    }
+
+    function startTimerOnly(timerNode) {
+      const started = performance.now();
+      timerNode.textContent = "0.0s";
+      const interval = setInterval(() => {
+        timerNode.textContent = formatDuration(performance.now() - started);
+      }, 100);
+      return (elapsedMs, failed = false) => {
+        clearInterval(interval);
+        timerNode.textContent = formatDuration(elapsedMs);
+      };
+    }
+
+    function createMessage(question) {
+      document.getElementById("empty-state")?.remove();
+
+      const userMessage = element("div", "message user-message");
+      userMessage.append(element("div", "user-bubble", question));
+      conversation.append(userMessage);
+
+      const assistant = element("div", "message assistant-message");
+      const heading = element("div", "assistant-heading");
+      heading.append(element("span", "avatar", "✦"));
+      heading.append(element("span", "", "Local Agent"));
+      const stateLabel = element("span", "connection", "Working…");
+      heading.append(stateLabel);
+
+      const content = element("div", "assistant-content");
+      const stages = element("div", "stage-list");
+      const rounds = element("div", "round-list");
+      const approval = element("div", "approval-slot");
+      const answerStage = element("div", "stage-card answer-stage");
+      answerStage.hidden = true;
+      const answerTop = element("div", "stage-top");
+      const answerName = element("div", "stage-name");
+      answerName.append(element("span", "stage-icon", "✦"));
+      answerName.append(element("span", "", "Response"));
+      const answerTimer = element("span", "timer", "Waiting");
+      answerTop.append(answerName, answerTimer);
+      const answer = element("div", "answer");
+      answerStage.append(answerTop, answer);
+
+      const error = element("div", "error-message");
+      error.hidden = true;
+      content.append(stages, approval, answerStage, error);
+      assistant.append(heading, content);
+      conversation.append(assistant);
+      scrollToLatest();
+
+      return {
+        assistant,
+        stateLabel,
+        stages,
+        rounds,
+        approval,
+        answerStage,
+        answerTimer,
+        answer,
+        error,
+        stageCards: new Map(),
+        taskCards: new Map(),
+        taskData: new Map(),
+        roundNodes: new Map(),
+        planningOutputs: new Map(),
+        responseText: "",
+      };
+    }
+
+    function getRound(message, roundNumber) {
+      if (!message.roundNodes.has(roundNumber)) {
+        const section = element("section", "round-section");
+        //section.append(element("div", "round-title", `Plan · round ${roundNumber}`));
+        const taskList = element("div", "task-list");
+        section.append(taskList);
+        message.rounds.append(section);
+        message.roundNodes.set(roundNumber, taskList);
+      }
+      return message.roundNodes.get(roundNumber);
+    }
+
+    function handleEvent(message, event) {
+      if (event.type === "stage_start" && event.stage === "planning") {
+        // const card = element("div", "stage-card");
+        // const top = element("div", "stage-top");
+        // const name = element("div", "stage-name");
+        // name.append(element("span", "stage-icon", "⌕"));
+        // name.append(element("span", "", `Planning · round ${event.round}`));
+        // const right = element("div", "stage-top");
+        // const timer = element("span", "timer");
+        // const status = element("span", "stage-status", "In progress");
+        // right.append(timer, status);
+        // top.append(name, right);
+
+        // const details = document.createElement("details");
+        // details.className = "planning-output";
+        // details.append(element("summary", "", "Planner output · streaming"));
+        // const output = element("pre");
+        // details.append(output);
+        // card.append(top, details);
+        //message.stages.append(card);
+        // message.stageCards.set(event.stage_id, {
+        //   card,
+        //   finish: startTimer(timer, card),
+        //   status,
+        // });
+        const stageStep = element("div", "stage_step_box");
+        const understanding = element("div", "understanding");
+        const taskList = element("div", "task-list-box");
+        understanding.hidden = false;
+        //understanding.append(element("div", "section-label", "Understanding"));
+        
+        const stageIcon = element("div", "loader_waiting");
+        const understandingText = element("span", "understanding_text", "Anayzing your request…");
+        const timerOfUnderstanding = element("span", "understanding_timer", "0.0s");
+        understanding.append(stageIcon);
+        understanding.append(understandingText);
+        understanding.append(timerOfUnderstanding);
+        stageStep.append(understanding);
+        stageStep.append(taskList);
+
+        message.stages.append(stageStep);
+        message.stageCards.set(event.stage_id, {
+          stageStep,
+          understandingText: understandingText,
+          taskList: taskList,
+          tList: new Map(),
+          stageIcon: stageIcon,
+          finish: startTimerOnly(timerOfUnderstanding),
+          status,
+        });
+
+        //message.planningOutputs.set(event.stage_id, output);
+      } else if (event.type === "planning_token") {
+
+        //const output = message.planningOutputs.get(event.stage_id);
+        //if (output) output.textContent += event.token;
+
+      } else if (event.type === "understanding") {
+        const stage = message.stageCards.get('planning-'+event.round);
+        console.log('stage',stage);
+        stage.understandingText.textContent = event.text;
+        stage.stageIcon.className = "circle-check";
+        stage.finish?.(event.elapsed_ms);
+      } else if (event.type === "plan") {
+        // const taskList = getRound(message, event.round);
+        // if (!event.tasks.length) {
+        //   taskList.append(element("div", "plan-summary", "No tool steps required."));
+        // }
+        // for (const task of event.tasks) {
+        //   const key = `${event.round}-${task.id}`;
+        //   if (message.taskCards.has(key)) continue;
+        //   const card = element("div", "task-card");
+        //   const top = element("div", "task-top");
+        //   const name = element("div", "task-name", `Step ${task.id} · ${task.tool}`);
+        //   const status = element("span", "task-status", "Queued");
+        //   top.append(name, status);
+        //   const purpose = element("p", "task-purpose", task.purpose);
+        //   const details = document.createElement("details");
+        //   details.className = "task-details";
+        //   details.append(element("summary", "", "Arguments"));
+        //   details.append(element("pre", "", JSON.stringify(task.arguments, null, 2)));
+        //   const footer = element("div", "stage-top");
+        //   const timer = element("span", "timer", "Not started");
+        //   footer.append(element("span", "timer", task.requires_approval ? "Approval required" : ""));
+        //   footer.append(timer);
+        //   card.append(top, purpose, details, footer);
+        //   taskList.append(card);
+        //   message.taskCards.set(key, { card, status, timer });
+        //   message.taskData.set(key, task);
+        // }
+        // if (!event.tasks.length && event.done) {
+        //   message.stateLabel.textContent = "Plan complete";
+        // }
+      } else if (event.type === "task_start") {
+        const key = `${event.round}-${event.task.id}`;
+        const stage = message.stageCards.get('planning-'+event.round);
+        console.log('stage',stage);
+
+        const task_item = element("div", "task-item");
+        task_item.hidden = false;
+        //understanding.append(element("div", "section-label", "Understanding"));
+        
+        const stageIcon = element("div", "loader_waiting");
+        const task_itemText = element("span", "task_item_text", `${event.task.tool} - ${event.task.purpose}`);
+        const timerOftask_item = element("span", "task_item_timer", "0.0s");
+        task_item.append(stageIcon);
+        task_item.append(task_itemText);
+        task_item.append(timerOftask_item);
+        stage.taskList.append(task_item);
+
+        stage.tList.set(event.task.id, {
+          task_item,
+          stageIcon: stageIcon,
+          finish: startTimerOnly(timerOftask_item),
+          status,
+        });
+
+        // const taskCard = message.taskCards.get(key);
+        // if (taskCard) {
+        //   taskCard.status.textContent = "Running";
+        //   taskCard.card.classList.add("is-running");
+        //   taskCard.finish = startTimer(taskCard.timer, taskCard.card);
+        // }
+
+
+        message.stateLabel.textContent = `Running ${event.task.tool}…`;
+      } else if (event.type === "task_complete") {
+        const key = `${event.round}-${event.task_id}`;
+
+        const stage = message.stageCards.get('planning-'+event.round);
+        const taskItemFromList=stage.tList.get(event.task_id);
+        taskItemFromList.stageIcon.className = "circle-check";
+        taskItemFromList.finish?.(event.elapsed_ms);
+
+        // const taskCard = message.taskCards.get(key);
+        // if (taskCard) {
+        //   taskCard.finish?.(event.elapsed_ms, !event.success);
+        //   taskCard.status.textContent = event.approval_denied
+        //     ? "Denied"
+        //     : event.success ? "Complete" : "Failed";
+        //   if (event.output !== null && event.output !== undefined) {
+        //     taskCard.card.append(element(
+        //       "pre",
+        //       "task-output",
+        //       typeof event.output === "string"
+        //         ? event.output
+        //         : JSON.stringify(event.output, null, 2),
+        //     ));
+        //   }
+        //   if (event.error) {
+        //     taskCard.card.append(element("div", "error-message", event.error));
+        //   }
+        // }
+      } else if (event.type === "task_skipped") {
+        const key = `${event.round}-${event.task_id}`;
+        const taskCard = message.taskCards.get(key);
+        if (taskCard) {
+          taskCard.status.textContent = "Skipped";
+          taskCard.card.classList.add("is-skipped");
+        }
+      } else if (event.type === "stage_complete") {
+        const stage = message.stageCards.get(event.stage_id);
+        if (stage) {
+          stage.finish(event.elapsed_ms);
+          stage.status.textContent = "Complete";
+        }
+        if (event.stage === "response") {
+          message.answerStageFinish?.(event.elapsed_ms);
+        }
+      } else if (event.type === "stage_start" && event.stage === "response") {
+        message.answerStage.hidden = false;
+        message.answerStageFinish = startTimer(
+          message.answerTimer,
+          message.answerStage,
+        );
+        message.stateLabel.textContent = "Writing response…";
+      } else if (event.type === "response_token") {
+        message.responseText += event.token;
+        message.answer.textContent = message.responseText;
+        scrollToLatest();
+      } else if (event.type === "approval_required") {
+        showApproval(message, event);
+      } else if (event.type === "status") {
+        message.stateLabel.textContent = event.message;
+      } else if (event.type === "error") {
+        message.error.hidden = false;
+        message.error.textContent = event.message;
+        message.stateLabel.textContent = "Stopped";
+      } else if (event.type === "run_complete") {
+        message.stateLabel.textContent = event.completed ? "Complete" : "Finished";
+      }
+      scrollToLatest();
+    }
+
+    function showApproval(message, event) {
+      message.approval.replaceChildren();
+      const card = element("div", "approval-card");
+      card.append(element("strong", "", `Approval needed · ${event.tool.name}`));
+      card.append(element("p", "", event.tool.description));
+      card.append(element("pre", "", JSON.stringify(event.arguments, null, 2)));
+      const actions = element("div", "approval-actions");
+      const approve = element("button", "approval-button approve", "Approve");
+      const deny = element("button", "approval-button deny", "Deny");
+      approve.type = deny.type = "button";
+      actions.append(approve, deny);
+      card.append(actions);
+      message.approval.append(card);
+
+      async function decide(approved) {
+        approve.disabled = deny.disabled = true;
+        try {
+          const response = await fetch("/api/approval", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              request_id: event.request_id,
+              approved,
+            }),
+          });
+          if (!response.ok) {
+            const failure = await response.json();
+            throw new Error(failure.detail || "Could not submit approval.");
+          }
+          card.append(element(
+            "p",
+            "",
+            approved ? "Approved. The tool will continue." : "Denied. The run will stop.",
+          ));
+        } catch (error) {
+          approve.disabled = deny.disabled = false;
+          card.append(element("p", "error-message", error.message));
+        }
+      }
+
+      approve.addEventListener("click", () => decide(true));
+      deny.addEventListener("click", () => decide(false));
+    }
+
+    async function consumeStream(response, message) {
+      if (!response.ok || !response.body) {
+        const failure = await response.json().catch(() => ({}));
+        throw new Error(failure.detail || `Request failed (${response.status}).`);
+      }
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let boundary;
+        while ((boundary = buffer.indexOf("\n\n")) !== -1) {
+          const frame = buffer.slice(0, boundary);
+          buffer = buffer.slice(boundary + 2);
+          const dataLine = frame.split("\n").find(line => line.startsWith("data:"));
+          if (dataLine) handleEvent(message, JSON.parse(dataLine.slice(5).trim()));
+        }
+      }
+      if (buffer.startsWith("data:")) {
+        handleEvent(message, JSON.parse(buffer.slice(5).trim()));
+      }
+    }
+
+    form.addEventListener("submit", async event => {
+      event.preventDefault();
+      const question = input.value.trim();
+      if (!question || sendButton.disabled) return;
+
+      const priorHistory = conversationHistory.slice(-12);
+      const message = createMessage(question);
+      input.value = "";
+      sendButton.disabled = true;
+      input.disabled = true;
+
+      try {
+        const response = await fetch("/api/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            question,
+            conversation_history: priorHistory,
+          }),
+        });
+        await consumeStream(response, message);
+        if (message.responseText) {
+          conversationHistory.push(
+            { role: "user", content: question },
+            { role: "assistant", content: message.responseText },
+          );
+        }
+      } catch (error) {
+        message.error.hidden = false;
+        message.error.textContent = error.message;
+        message.stateLabel.textContent = "Stopped";
+      } finally {
+        sendButton.disabled = false;
+        input.disabled = false;
+        input.focus();
+      }
+    });
+
+    input.addEventListener("keydown", event => {
+      if (event.key === "Enter" && !event.shiftKey) {
+        event.preventDefault();
+        form.requestSubmit();
+      }
+    });
+
+    async function checkHealth() {
+      try {
+        const response = await fetch("/api/health");
+        const health = await response.json();
+        connection.textContent = "Connected";
+        connection.classList.add("online");
+        backendPill.textContent = `Backend · ${health.backend}`;
+      } catch {
+        connection.textContent = "Agent unavailable";
+        backendPill.textContent = "Offline";
+      }
+    }
+
+    checkHealth();
+  </script>
+</body>
+</html>

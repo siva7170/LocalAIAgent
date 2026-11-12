@@ -10,8 +10,15 @@ AVAILABLE TOOLS:
 EXECUTION HISTORY:
 {history}
 
+CONVERSATION HISTORY:
+{conversation}
+
 ORIGINAL USER REQUEST:
 {question}
+
+CONVERSATION GUIDANCE:
+Use prior conversation only to understand references in the current request.
+The ORIGINAL USER REQUEST defines the action to execute now.
 
 RULES:
 
@@ -177,6 +184,10 @@ ORIGINAL USER REQUEST:
 
 ACTUAL EXECUTION HISTORY:
 {history}
+
+CONVERSATION GUIDANCE:
+Use conversation_history to interpret follow-up questions. Report execution
+only from the actual current execution history.
 
 RULES:
 

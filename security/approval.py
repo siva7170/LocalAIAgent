@@ -1,6 +1,11 @@
 class ApprovalManager:
 
+    def __init__(self, approval_callback=None):
+        self.approval_callback = approval_callback
+
     def request_approval(self, tool, arguments):
+        if self.approval_callback is not None:
+            return self.approval_callback(tool, arguments)
 
         print("\n" + "=" * 60)
         print("SECURITY APPROVAL REQUIRED")

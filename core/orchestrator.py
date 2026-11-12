@@ -12,12 +12,12 @@ from config import WORKSPACE_PATH
 
 class Orchestrator:
 
-    def __init__(self, registry):
+    def __init__(self, registry, approval_callback=None):
 
         self.registry = registry
 
         self.permissions = PermissionManager()
-        self.approvals = ApprovalManager()
+        self.approvals = ApprovalManager(approval_callback)
         self.workspace = WorkspaceManager(WORKSPACE_PATH)
         self.audit = SecurityAudit()
 
