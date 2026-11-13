@@ -9,3 +9,4 @@
 /tests/__pycache__/*
 models/qwen2.5-coder-3b-instruct-q4_k_m.gguf
 models/qwen2.5-coder-7b-instruct-q4_k_m.gguf
+agent_result.json
