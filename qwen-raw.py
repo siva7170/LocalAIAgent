@@ -1,5 +1,9 @@
 import os
 import json
+import ast
+import subprocess
+import sys
+from pathlib import Path
 from collections import defaultdict, deque
 from llama_cpp import Llama
 
@@ -581,64 +585,357 @@ def validate_grouping(groups, operations):
         visit(group_id)
 
 
+
+
 # ============================================================
-# 6. MAIN APPLICATION - STEPS 1 AND 2 ONLY
+# 6. STEP 3 - GROUP CODE GENERATOR, VALIDATOR AND EXECUTOR
+# ============================================================
+
+GENERATED_DIR = Path("generated_scripts")
+WORKSPACE_DIR = Path("workspaces")
+RESULT_FILE = Path("agent_result.json")
+GROUP_TIMEOUT_SECONDS = 120
+
+
+def topological_group_order(groups):
+    """Return groups in dependency order; reject invalid dependency graphs."""
+    by_id = {group["group_id"]: group for group in groups}
+    indegree = {group_id: 0 for group_id in by_id}
+    dependents = defaultdict(list)
+
+    for group_id, group in by_id.items():
+        for dependency in group.get("depends_on", []):
+            if dependency not in by_id:
+                raise ValueError(
+                    f"Group {group_id} depends on unknown group {dependency}."
+                )
+            indegree[group_id] += 1
+            dependents[dependency].append(group_id)
+
+    ready = deque(group_id for group_id in by_id if indegree[group_id] == 0)
+    ordered = []
+    while ready:
+        group_id = ready.popleft()
+        ordered.append(by_id[group_id])
+        for child in dependents[group_id]:
+            indegree[child] -= 1
+            if indegree[child] == 0:
+                ready.append(child)
+
+    if len(ordered) != len(groups):
+        raise ValueError("Circular execution-group dependency detected.")
+    return ordered
+
+
+def generate_group_program(user_request, analysis, optimization, group,
+                           previous_results):
+    """Ask Qwen 7B for one complete Python program for this execution group."""
+    operations_by_id = {
+        item["operation_id"]: item for item in analysis["operations"]
+    }
+    group_operations = [
+        operations_by_id[operation_id]
+        for operation_id in group["operation_ids"]
+    ]
+
+    system_prompt = """
+You are the Code Generator in a local AI execution engine.
+Generate ONE complete, runnable Python program for ONE execution group.
+Return a JSON object only, with exactly these fields:
+{
+  "program_name": "short descriptive name",
+  "python_code": "complete Python source code",
+  "implementation_notes": ["brief notes"],
+  "expected_observations": ["what successful execution should print"]
+}
+
+Rules:
+- Implement every operation in the supplied group, in dependency order.
+- Do not implement operations belonging to other groups.
+- Use only Python standard-library modules unless the user explicitly
+  requested an installed package. Do not install packages.
+- Use the supplied workspace directory for files created for this task.
+  Create it if needed. Use absolute paths built from WORKSPACE_DIR.
+- Print clear progress and final results to stdout. Print errors to stderr
+  and exit non-zero when an operation cannot be completed.
+- Preserve useful outputs in a JSON file named group_output.json inside the
+  supplied workspace. Include output values needed by dependent groups.
+- Read prior group outputs only from the supplied previous_group_results.
+  Do not fabricate missing values or claim an operation succeeded unless
+  the code verifies it.
+- Do not use subprocess, shell commands, eval, exec, dynamic imports,
+  network access, credentials, or destructive cleanup.
+- Do not delete or overwrite unrelated user files. If a target already
+  exists, follow the user's stated overwrite intent; otherwise fail safely.
+- For database work, use only connection details explicitly supplied by the
+  user. Never invent credentials, hostnames, schemas, or database paths.
+  If essential connection details are absent, report that clearly and exit
+  non-zero rather than guessing.
+- Avoid hardcoded sample data unless the user supplied it.
+- Return syntactically valid Python source as a JSON string.
+"""
+
+    context = {
+        "original_user_request": user_request,
+        "user_intent": analysis.get("user_intent"),
+        "constraints": analysis.get("constraints", []),
+        "assumptions": analysis.get("assumptions", []),
+        "unresolved_inputs": analysis.get("unresolved_inputs", []),
+        "execution_group": group,
+        "operations_for_this_group": group_operations,
+        "previous_group_results": previous_results,
+        "workspace_directory": str(WORKSPACE_DIR.resolve()),
+        "group_output_contract": {
+            "file": "group_output.json",
+            "purpose": "Persist verified outputs required by later groups"
+        }
+    }
+
+    response = ask_llm(
+        system_prompt,
+        json.dumps(context, indent=2, ensure_ascii=False),
+        max_tokens=4096
+    )
+
+    code = response.get("python_code")
+    if not isinstance(code, str) or not code.strip():
+        raise ValueError("Code Generator returned an empty python_code field.")
+
+    return response
+
+
+def validate_generated_program(python_code, script_path):
+    """Static checks only; this is not a security sandbox."""
+    if not python_code or not python_code.strip():
+        raise ValueError("Generated program is empty.")
+
+    try:
+        tree = ast.parse(python_code, filename=str(script_path))
+    except SyntaxError as ex:
+        raise ValueError(f"Python syntax validation failed: {ex}") from ex
+
+    blocked_imports = {
+        "subprocess", "socket", "ctypes", "multiprocessing",
+        "pty", "telnetlib", "ftplib", "paramiko", "requests"
+    }
+    blocked_calls = {"eval", "exec", "compile", "__import__", "breakpoint"}
+    blocked_attributes = {"system", "popen", "remove", "rmdir", "rmtree"}
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                root = alias.name.split(".")[0]
+                if root in blocked_imports:
+                    raise ValueError(f"Blocked import detected: {root}")
+
+        elif isinstance(node, ast.ImportFrom):
+            root = (node.module or "").split(".")[0]
+            if root in blocked_imports:
+                raise ValueError(f"Blocked import detected: {root}")
+
+        elif isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Name) and node.func.id in blocked_calls:
+                raise ValueError(f"Blocked function call detected: {node.func.id}()")
+            if isinstance(node.func, ast.Attribute) and node.func.attr in blocked_attributes:
+                raise ValueError(f"Blocked operation detected: .{node.func.attr}()")
+
+    return True
+
+
+def save_agent_result(result):
+    RESULT_FILE.write_text(
+        json.dumps(result, indent=4, ensure_ascii=False),
+        encoding="utf-8"
+    )
+
+
+def execute_group_program(user_request, analysis, optimization, group,
+                          previous_results, execution_state):
+    group_id = group["group_id"]
+    WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
+    GENERATED_DIR.mkdir(parents=True, exist_ok=True)
+
+    print(f"\n[GROUP {group_id}] Generating one complete Python program...")
+    generated = generate_group_program(
+        user_request, analysis, optimization, group, previous_results
+    )
+
+    script_path = GENERATED_DIR / f"group_{group_id:03d}.py"
+    code = generated["python_code"].strip()
+    if code.startswith("```python"):
+        code = code[len("```python"):].strip()
+    elif code.startswith("```"):
+        code = code[3:].strip()
+    if code.endswith("```"):
+        code = code[:-3].strip()
+
+    validate_generated_program(code, script_path)
+    script_path.write_text(code + "\n", encoding="utf-8")
+
+    print(f"[CODE GENERATED] {script_path}")
+    print("[IMPLEMENTATION NOTES]")
+    for note in generated.get("implementation_notes", []):
+        print(f"  - {note}")
+    print("\n" + "-" * 72)
+    print(code)
+    print("-" * 72)
+
+    approval = input(
+        f"Approve execution of group {group_id}? Type 'yes' to execute: "
+    ).strip().lower()
+    if approval != "yes":
+        return {
+            "group_id": group_id,
+            "status": "approval_denied",
+            "script_path": str(script_path),
+            "stdout": "",
+            "stderr": "Execution was not approved by the user.",
+            "returncode": None,
+            "implementation_notes": generated.get("implementation_notes", [])
+        }
+
+    print(f"\n[EXECUTING GROUP {group_id}]")
+    try:
+        process = subprocess.run(
+            [sys.executable, "-u", str(script_path.resolve())],
+            cwd=str(Path.cwd()),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=GROUP_TIMEOUT_SECONDS
+        )
+        status = "succeeded" if process.returncode == 0 else "failed"
+        outcome = {
+            "group_id": group_id,
+            "status": status,
+            "script_path": str(script_path),
+            "stdout": process.stdout,
+            "stderr": process.stderr,
+            "returncode": process.returncode,
+            "implementation_notes": generated.get("implementation_notes", [])
+        }
+        if process.stdout:
+            print("[STDOUT]\n" + process.stdout)
+        if process.stderr:
+            print("[STDERR]\n" + process.stderr)
+        return outcome
+
+    except subprocess.TimeoutExpired as ex:
+        return {
+            "group_id": group_id,
+            "status": "timeout",
+            "script_path": str(script_path),
+            "stdout": "",
+            "stderr": str(ex),
+            "returncode": None,
+            "implementation_notes": generated.get("implementation_notes", [])
+        }
+    except Exception as ex:
+        return {
+            "group_id": group_id,
+            "status": "failed",
+            "script_path": str(script_path),
+            "stdout": "",
+            "stderr": f"{type(ex).__name__}: {ex}",
+            "returncode": None,
+            "implementation_notes": generated.get("implementation_notes", [])
+        }
+
+
+def execute_optimized_plan(user_request, analysis, optimization, final_output):
+    """Execute groups in dependency order; isolate failures and continue independent work."""
+    groups = topological_group_order(optimization["execution_groups"])
+    results_by_group = {}
+    operation_status = {}
+
+    final_output["execution_status"] = "in_progress"
+    final_output["group_execution_results"] = []
+    save_agent_result(final_output)
+
+    for group in groups:
+        group_id = group["group_id"]
+        dependencies = group.get("depends_on", [])
+        failed_dependencies = [
+            dep for dep in dependencies
+            if results_by_group.get(dep, {}).get("status") != "succeeded"
+        ]
+
+        if failed_dependencies:
+            outcome = {
+                "group_id": group_id,
+                "status": "skipped_dependency_failed",
+                "script_path": None,
+                "stdout": "",
+                "stderr": f"Required groups did not succeed: {failed_dependencies}",
+                "returncode": None
+            }
+            print(f"\n[GROUP {group_id} SKIPPED] Failed dependencies: {failed_dependencies}")
+        else:
+            outcome = execute_group_program(
+                user_request,
+                analysis,
+                optimization,
+                group,
+                results_by_group,
+                final_output
+            )
+
+        results_by_group[group_id] = outcome
+        final_output["group_execution_results"].append(outcome)
+        save_agent_result(final_output)
+
+        for operation_id in group["operation_ids"]:
+            operation_status[operation_id] = outcome["status"]
+
+        print(f"[GROUP {group_id} STATUS] {outcome['status']}")
+
+    statuses = [item["status"] for item in results_by_group.values()]
+    if statuses and all(status == "succeeded" for status in statuses):
+        final_output["execution_status"] = "succeeded"
+    elif any(status == "succeeded" for status in statuses):
+        final_output["execution_status"] = "partially_succeeded"
+    else:
+        final_output["execution_status"] = "failed"
+
+    final_output["operation_execution_status"] = operation_status
+    save_agent_result(final_output)
+    return final_output
+
+
+# ============================================================
+# 7. MAIN APPLICATION - STEPS 1, 2 AND 3
 # ============================================================
 
 def main():
-    print("\nQwen 2.5 Coder 7B - Adaptive Plan Analyzer")
+    print("\nQwen 2.5 Coder 7B - Adaptive Execution Engine")
     print("Step 1: Requirement Analysis and Operation Planning")
     print("Step 2: Operation Assessment, Classification and Optimization")
+    print("Step 3: Group Code Generation, Validation and Execution")
+    print("Generated code is shown and requires your approval before execution.")
     print("Type 'exit' to quit.\n")
 
     while True:
         user_input = input("\nYou: ").strip()
-
         if user_input.lower() in ["exit", "quit"]:
             break
-
         if not user_input:
             continue
 
         try:
-            # STEP 1
             print("\n[STEP 1] Analyzing requirements and identifying operations...")
-
             analysis = analyze_requirements(user_input)
-
             print("\n[REQUIREMENT ANALYSIS]")
             print(json.dumps(analysis, indent=4, ensure_ascii=False))
 
-            # STEP 2
             print("\n[STEP 2] Assessing operations and optimizing execution plan...")
-
-            optimization = optimize_execution_plan(
-                user_input,
-                analysis
-            )
-
+            optimization = optimize_execution_plan(user_input, analysis)
             print("\n[OPERATION ASSESSMENTS]")
-            print(json.dumps(
-                optimization["operation_assessments"],
-                indent=4,
-                ensure_ascii=False
-            ))
-
-            print("\n[CANDIDATE STRATEGIES]")
-            print(json.dumps(
-                optimization["candidate_strategies"],
-                indent=4,
-                ensure_ascii=False
-            ))
-
+            print(json.dumps(optimization["operation_assessments"], indent=4, ensure_ascii=False))
             print("\n[SELECTED EXECUTION PLAN]")
             print("Selected strategy:", optimization["selected_strategy_id"])
             print("Reason:", optimization["selection_reason"])
-            print(json.dumps(
-                optimization["execution_groups"],
-                indent=4,
-                ensure_ascii=False
-            ))
+            print(json.dumps(optimization["execution_groups"], indent=4, ensure_ascii=False))
 
             final_output = {
                 "original_user_request": user_input,
@@ -655,26 +952,28 @@ def main():
                 "selection_reason": optimization["selection_reason"],
                 "optimization_summary": optimization["optimization_summary"],
                 "execution_groups": optimization["execution_groups"],
-                "execution_status": "not_started"
+                "execution_status": "not_started",
+                "group_execution_results": []
             }
+            save_agent_result(final_output)
 
-            with open("agent_result.json", "w", encoding="utf-8") as file:
-                json.dump(
-                    final_output,
-                    file,
-                    indent=4,
-                    ensure_ascii=False
-                )
+            print("\n[STEP 3] Ready to generate and execute group programs.")
+            print("Review each generated program carefully before approving it.")
+            final_output = execute_optimized_plan(
+                user_input, analysis, optimization, final_output
+            )
 
-            print("\n" + "=" * 65)
-            print("STEP 1 AND STEP 2 COMPLETED")
-            print("=" * 65)
-            print("Execution has NOT started. No generated Python was executed.")
-            print("Result saved to agent_result.json")
+            print("\n" + "=" * 72)
+            print("STEP 1, STEP 2 AND STEP 3 COMPLETED")
+            print("Final execution status:", final_output["execution_status"])
+            print("Results saved to agent_result.json")
+            print("Generated programs saved in generated_scripts/")
+            print("Task files should be created under workspaces/ when the generated code follows the workspace contract.")
+            print("=" * 72)
 
         except Exception as ex:
-            print(f"\n[PLANNING ERROR] {type(ex).__name__}: {ex}")
-            print("No execution was started.")
+            print(f"\n[WORKFLOW ERROR] {type(ex).__name__}: {ex}")
+            print("Check agent_result.json for the last saved checkpoint, if available.")
 
 
 if __name__ == "__main__":
