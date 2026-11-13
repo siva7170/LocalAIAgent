@@ -3,9 +3,9 @@ import json
 import ast
 import subprocess
 import sys
-from pathlib import Path
 from collections import defaultdict, deque
 from llama_cpp import Llama
+from pathlib import Path
 
 
 # ============================================================
@@ -673,6 +673,10 @@ Rules:
   non-zero rather than guessing.
 - Avoid hardcoded sample data unless the user supplied it.
 - Return syntactically valid Python source as a JSON string.
+- For Windows paths, use pathlib.Path with path components, or use forward
+  slashes in string literals. Never write ordinary string literals containing
+  backslash sequences such as a backslash followed by W; use raw strings only when
+  appropriate. Avoid invalid-escape SyntaxWarnings.
 """
 
     context = {
@@ -719,7 +723,10 @@ def validate_generated_program(python_code, script_path):
         "pty", "telnetlib", "ftplib", "paramiko", "requests"
     }
     blocked_calls = {"eval", "exec", "compile", "__import__", "breakpoint"}
-    blocked_attributes = {"system", "popen", "remove", "rmdir", "rmtree"}
+    # Do not block generic methods such as list.remove().
+    # Block only known destructive/system APIs by their receiver/module.
+    blocked_os_methods = {"system", "popen", "remove", "rmdir"}
+    blocked_path_methods = {"unlink", "rmdir"}
 
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -736,8 +743,39 @@ def validate_generated_program(python_code, script_path):
         elif isinstance(node, ast.Call):
             if isinstance(node.func, ast.Name) and node.func.id in blocked_calls:
                 raise ValueError(f"Blocked function call detected: {node.func.id}()")
-            if isinstance(node.func, ast.Attribute) and node.func.attr in blocked_attributes:
-                raise ValueError(f"Blocked operation detected: .{node.func.attr}()")
+            if isinstance(node.func, ast.Attribute):
+                receiver = node.func.value
+                method = node.func.attr
+
+                if (
+                    isinstance(receiver, ast.Name)
+                    and receiver.id == "os"
+                    and method in blocked_os_methods
+                ):
+                    raise ValueError(
+                        f"Blocked OS operation detected: os.{method}()"
+                    )
+
+                if (
+                    isinstance(receiver, ast.Name)
+                    and receiver.id == "shutil"
+                    and method in {"rmtree", "move"}
+                ):
+                    raise ValueError(
+                        f"Blocked filesystem operation detected: shutil.{method}()"
+                    )
+
+                if (
+                    method in blocked_path_methods
+                    and isinstance(receiver, ast.Call)
+                    and isinstance(receiver.func, ast.Name)
+                    and receiver.func.id == "Path"
+                ):
+                    # Direct pathlib deletion calls are rejected in Step 3
+                    # until recovery-aware deletion is implemented.
+                    raise ValueError(
+                        f"Blocked pathlib operation detected: Path(...).{method}()"
+                    )
 
     return True
 
