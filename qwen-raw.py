@@ -654,8 +654,9 @@ Rules:
 - Do not implement operations belonging to other groups.
 - Use only Python standard-library modules unless the user explicitly
   requested an installed package. Do not install packages.
-- Use the supplied workspace directory for files created for this task.
-  Create it if needed. Use absolute paths built from WORKSPACE_DIR.
+- The executor injects WORKSPACE_DIR as a pathlib.Path and imports json,
+  sys, and Path. Do not redefine WORKSPACE_DIR. Use it for task files.
+  Create it if needed. Use paths built from WORKSPACE_DIR.
 - Print clear progress and final results to stdout. Print errors to stderr
   and exit non-zero when an operation cannot be completed.
 - Preserve useful outputs in a JSON file named group_output.json inside the
@@ -806,6 +807,24 @@ def execute_group_program(user_request, analysis, optimization, group,
         code = code[3:].strip()
     if code.endswith("```"):
         code = code[:-3].strip()
+
+    # The executor, not the LLM, owns the workspace path and essential
+    # runtime imports. This prevents malformed Windows path literals and
+    # missing json/sys imports in generated programs.
+    import re
+    code = re.sub(
+        r"(?m)^\s*WORKSPACE_DIR\s*=.*(?:\r?\n|$)",
+        "",
+        code
+    )
+    runtime_preamble = (
+        "import json\n"
+        "import sys\n"
+        "from pathlib import Path\n"
+        f"WORKSPACE_DIR = Path({WORKSPACE_DIR.resolve().as_posix()!r})\n"
+        "\n"
+    )
+    code = runtime_preamble + code.lstrip()
 
     validate_generated_program(code, script_path)
     script_path.write_text(code + "\n", encoding="utf-8")
