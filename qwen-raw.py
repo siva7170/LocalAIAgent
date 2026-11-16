@@ -1,8 +1,10 @@
 import os
 import json
 import ast
+import hashlib
 import subprocess
 import sys
+from pathlib import Path
 from collections import defaultdict, deque
 from llama_cpp import Llama
 from pathlib import Path
@@ -628,7 +630,7 @@ def topological_group_order(groups):
 
 
 def generate_group_program(user_request, analysis, optimization, group,
-                           previous_results):
+                           previous_results, recovery_context=None):
     """Ask Qwen 7B for one complete Python program for this execution group."""
     operations_by_id = {
         item["operation_id"]: item for item in analysis["operations"]
@@ -673,6 +675,12 @@ Rules:
   If essential connection details are absent, report that clearly and exit
   non-zero rather than guessing.
 - Avoid hardcoded sample data unless the user supplied it.
+- If recovery_context is provided, treat it as the actual failure evidence.
+  Diagnose and repair the existing attempt; do not repeat side effects that
+  have already succeeded. Before creating a file/table/record, inspect whether
+  the intended result already exists and matches the requested state. If it
+  already matches, preserve it and perform only the remaining work.
+- Do not blindly repeat a non-idempotent operation. Prefer a minimal repair.
 - Return syntactically valid Python source as a JSON string.
 - For Windows paths, use pathlib.Path with path components, or use forward
   slashes in string literals. Never write ordinary string literals containing
@@ -689,6 +697,7 @@ Rules:
         "execution_group": group,
         "operations_for_this_group": group_operations,
         "previous_group_results": previous_results,
+        "recovery_context": recovery_context or {},
         "workspace_directory": str(WORKSPACE_DIR.resolve()),
         "group_output_contract": {
             "file": "group_output.json",
@@ -788,18 +797,20 @@ def save_agent_result(result):
     )
 
 
-def execute_group_program(user_request, analysis, optimization, group,
-                          previous_results, execution_state):
+def execute_group_attempt(user_request, analysis, optimization, group,
+                          previous_results, execution_state,
+                          recovery_context=None, attempt_number=1):
     group_id = group["group_id"]
     WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
     GENERATED_DIR.mkdir(parents=True, exist_ok=True)
 
     print(f"\n[GROUP {group_id}] Generating one complete Python program...")
     generated = generate_group_program(
-        user_request, analysis, optimization, group, previous_results
+        user_request, analysis, optimization, group, previous_results,
+        recovery_context=recovery_context
     )
 
-    script_path = GENERATED_DIR / f"group_{group_id:03d}.py"
+    script_path = GENERATED_DIR / f"group_{group_id:03d}_attempt_{attempt_number:02d}.py"
     code = generated["python_code"].strip()
     if code.startswith("```python"):
         code = code[len("```python"):].strip()
@@ -900,6 +911,211 @@ def execute_group_program(user_request, analysis, optimization, group,
         }
 
 
+def snapshot_workspace():
+    """Capture actual workspace file state for partial-side-effect diagnosis."""
+    snapshot = {}
+    if not WORKSPACE_DIR.exists():
+        return snapshot
+
+    for path in WORKSPACE_DIR.rglob("*"):
+        if not path.is_file():
+            continue
+        try:
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            snapshot[str(path.relative_to(WORKSPACE_DIR))] = {
+                "size": path.stat().st_size,
+                "sha256": digest
+            }
+        except OSError as ex:
+            snapshot[str(path.relative_to(WORKSPACE_DIR))] = {
+                "inspection_error": f"{type(ex).__name__}: {ex}"
+            }
+    return snapshot
+
+
+def compare_workspace_snapshots(before, after):
+    changes = []
+    all_paths = sorted(set(before) | set(after))
+    for relative_path in all_paths:
+        old = before.get(relative_path)
+        new = after.get(relative_path)
+        if old != new:
+            if old is None:
+                change_type = "created"
+            elif new is None:
+                change_type = "deleted"
+            else:
+                change_type = "modified"
+            changes.append({
+                "path": relative_path,
+                "change_type": change_type,
+                "before": old,
+                "after": new
+            })
+    return changes
+
+
+def diagnose_execution_failure(user_request, analysis, optimization, group,
+                               attempt_result, workspace_changes,
+                               recovery_history):
+    """Ask Qwen to diagnose evidence and select a conservative recovery action."""
+    system_prompt = """
+You are the Result Analyzer and Recovery Planner in a local AI execution engine.
+Analyze a failed execution using only the supplied evidence.
+Do not claim that an operation succeeded unless evidence proves it.
+
+Choose exactly one recovery_action:
+- repair: generate a corrected complete program for this same group.
+  Use this when code, imports, paths, output persistence, or another local
+  implementation defect caused the failure. Preserve successful side effects.
+- retry: repeat the same group only when the evidence shows the attempt made
+  no side effects and repeating it is safe. Set retry_safe=true only then.
+- stop: recovery is unsafe, impossible, requires missing user input, or the
+  failure is not safely recoverable.
+
+Never choose retry merely because an operation is marked reversible.
+Consider stdout, stderr, exit code, changed workspace files, operation risk,
+previous attempts, and the original user requirement. A created/modified file
+is a real side effect even if the process later exits with an error.
+If a requested output already exists and its contents are verified, tell the
+Code Generator to preserve it and complete only the missing work.
+Do not invent file contents, database state, or success evidence.
+
+Return JSON only with this exact structure:
+{
+  "recovery_action": "repair|retry|stop",
+  "diagnosis": "specific root cause based on evidence",
+  "evidence": ["observed facts"],
+  "partial_success": ["verified side effects, if any"],
+  "remaining_work": ["work still needed"],
+  "retry_safe": false,
+  "repair_instructions": ["specific instructions for corrected program"],
+  "user_input_required": [],
+  "confidence": "low|medium|high"
+}
+"""
+    payload = {
+        "original_user_request": user_request,
+        "requirements": analysis.get("user_requirements", []),
+        "operations": [
+            op for op in analysis.get("operations", [])
+            if op.get("operation_id") in group.get("operation_ids", [])
+        ],
+        "execution_group": group,
+        "failed_attempt": attempt_result,
+        "workspace_changes_observed_by_python": workspace_changes,
+        "previous_recovery_attempts": recovery_history,
+    }
+    result = ask_llm(
+        system_prompt,
+        json.dumps(payload, indent=2, ensure_ascii=False),
+        max_tokens=2048
+    )
+    action = result.get("recovery_action")
+    if action not in {"repair", "retry", "stop"}:
+        raise ValueError(f"Recovery Planner returned invalid action: {action!r}")
+    if not isinstance(result.get("retry_safe"), bool):
+        raise ValueError("Recovery Planner must return boolean retry_safe.")
+    for key in ("evidence", "partial_success", "remaining_work",
+                "repair_instructions", "user_input_required"):
+        if not isinstance(result.get(key), list):
+            raise ValueError(f"Recovery Planner field '{key}' must be an array.")
+    return result
+
+
+def execute_group_program(user_request, analysis, optimization, group,
+                          previous_results, execution_state):
+    """Execute, diagnose and recover a group with a bounded retry budget."""
+    max_attempts = 3
+    recovery_history = []
+    recovery_context = None
+
+    for attempt_number in range(1, max_attempts + 1):
+        before = snapshot_workspace()
+        outcome = execute_group_attempt(
+            user_request, analysis, optimization, group, previous_results,
+            execution_state, recovery_context=recovery_context,
+            attempt_number=attempt_number
+        )
+        after = snapshot_workspace()
+        workspace_changes = compare_workspace_snapshots(before, after)
+        outcome["attempt_number"] = attempt_number
+        outcome["workspace_changes"] = workspace_changes
+
+        if outcome.get("status") == "succeeded":
+            outcome["recovery_history"] = recovery_history
+            return outcome
+
+        if attempt_number >= max_attempts:
+            outcome["recovery_history"] = recovery_history
+            outcome["recovery_exhausted"] = True
+            return outcome
+
+        print(f"\n[STEP 4] Diagnosing failure in group {group['group_id']}...")
+        try:
+            diagnosis = diagnose_execution_failure(
+                user_request, analysis, optimization, group, outcome,
+                workspace_changes, recovery_history
+            )
+        except Exception as ex:
+            outcome["recovery_diagnosis_error"] = f"{type(ex).__name__}: {ex}"
+            outcome["recovery_history"] = recovery_history
+            return outcome
+
+        print("[FAILURE DIAGNOSIS]")
+        print(json.dumps(diagnosis, indent=4, ensure_ascii=False))
+        recovery_history.append({
+            "attempt_number": attempt_number,
+            "diagnosis": diagnosis,
+            "workspace_changes": workspace_changes
+        })
+
+        action = diagnosis["recovery_action"]
+        if action == "stop":
+            outcome["recovery_history"] = recovery_history
+            outcome["recovery_stopped"] = True
+            return outcome
+
+        if action == "retry":
+            # Python, not the LLM, enforces this gate. Any observed workspace
+            # mutation means an unmodified retry is not allowed.
+            if workspace_changes or not diagnosis["retry_safe"]:
+                print("[RECOVERY BLOCKED] Retry is unsafe because side effects "
+                      "were observed or retry_safe was not confirmed.")
+                outcome["recovery_history"] = recovery_history
+                outcome["recovery_stopped"] = True
+                outcome["recovery_block_reason"] = (
+                    "Unmodified retry requires no workspace changes and "
+                    "retry_safe=true."
+                )
+                return outcome
+            recovery_context = {
+                "action": "retry",
+                "diagnosis": diagnosis,
+                "instruction": "Retry only because Python observed no workspace changes."
+            }
+            print("[RECOVERY] LLM selected a safe retry; no workspace changes were detected.")
+            continue
+
+        recovery_context = {
+            "action": "repair",
+            "diagnosis": diagnosis,
+            "workspace_changes": workspace_changes,
+            "instruction": (
+                "Repair the failed program. Preserve all successful side effects. "
+                "Do not repeat already-completed operations."
+            )
+        }
+        print("[RECOVERY] Generating a repaired program. User approval is required again.")
+
+    return {
+        "group_id": group["group_id"],
+        "status": "failed",
+        "stderr": "Recovery loop ended unexpectedly.",
+        "recovery_history": recovery_history
+    }
+
+
 def execute_optimized_plan(user_request, analysis, optimization, final_output):
     """Execute groups in dependency order; isolate failures and continue independent work."""
     groups = topological_group_order(optimization["execution_groups"])
@@ -969,6 +1185,7 @@ def main():
     print("Step 1: Requirement Analysis and Operation Planning")
     print("Step 2: Operation Assessment, Classification and Optimization")
     print("Step 3: Group Code Generation, Validation and Execution")
+    print("Step 4: Failure Diagnosis, Safe Recovery and Re-execution")
     print("Generated code is shown and requires your approval before execution.")
     print("Type 'exit' to quit.\n")
 
@@ -1021,7 +1238,7 @@ def main():
             )
 
             print("\n" + "=" * 72)
-            print("STEP 1, STEP 2 AND STEP 3 COMPLETED")
+            print("STEP 1, STEP 2, STEP 3 AND STEP 4 COMPLETED")
             print("Final execution status:", final_output["execution_status"])
             print("Results saved to agent_result.json")
             print("Generated programs saved in generated_scripts/")
