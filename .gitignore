@@ -14,3 +14,8 @@ generated_scripts/group_001.py
 generated_scripts/group_001_attempt_01.py
 workspaces/group_output.json
 workspaces/step4_recovery_test.txt
+generated_scripts/group_001_attempt_02.py
+workspaces/group_output.json
+workspaces/test_scenario_a.txt
+workspaces/test_scenario_b.txt
+workspaces/test_scenario_c.txt
